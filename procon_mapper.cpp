@@ -38,6 +38,7 @@ constexpr unsigned short kProductId = 0x2009;
 constexpr int kReadTimeoutMs = 100;
 constexpr int kAckTimeoutMs = 300;
 constexpr int kPollIntervalMs = 50;
+constexpr auto kStallTimeout = std::chrono::seconds(1);  // no input reports for this long = stalled
 constexpr double kStickCenter = 2048.0;  // 12-bit stick values rest around 0x800
 constexpr double kStickRange = 1400.0;   // nominal deflection from center
 
@@ -458,12 +459,14 @@ bool handshake(hid_device* dev) {
                    [](const unsigned char* b, int n) { return n >= 2 && b[0] == 0x81 && b[1] == 0x02; });
 }
 
-// Subcommand 0x30 (set player lights) in output report 0x01 with neutral rumble data.
-bool setPlayerLights(hid_device* dev, unsigned char mask) {
-    const unsigned char report[12]{0x01, 0x00, 0x00, 0x01, 0x40, 0x40, 0x00, 0x01, 0x40, 0x40,
-                                   0x30, mask};
+// Sends a subcommand in output report 0x01 with neutral rumble data and waits
+// for the 0x21 reply that echoes the subcommand ID.
+bool subcommand(hid_device* dev, unsigned char id, unsigned char arg) {
+    static unsigned char counter = 0;
+    const unsigned char report[12]{0x01, static_cast<unsigned char>(counter++ & 0x0F),
+                                   0x00, 0x01, 0x40, 0x40, 0x00, 0x01, 0x40, 0x40, id, arg};
     return request(dev, report, sizeof report,
-                   [](const unsigned char* b, int n) { return n >= 15 && b[0] == 0x21 && b[14] == 0x30; });
+                   [id](const unsigned char* b, int n) { return n >= 15 && b[0] == 0x21 && b[14] == id; });
 }
 
 // Directions pressed for each of the 8 sectors, counter-clockwise from right.
@@ -502,13 +505,20 @@ void applyStick(Output& out, const StickConfig& sc, Stick raw, const Config& cfg
     }
 }
 
-void runSession(hid_device* dev, const Config& cfg) {
+void runSession(hid_device* dev, const Config& cfg, bool debug) {
     std::printf("connected\n");
     if (!handshake(dev)) {
         std::printf("no handshake ack (%ls)\n", errorText(dev));
         return;
     }
-    std::printf("handshake ok, player lights %s\n", setPlayerLights(dev, 0x01) ? "set" : "not acknowledged");
+    // Input mode 0x30 makes the controller stream full input reports. macOS's
+    // driver sometimes sets this before we open the device, but not always.
+    if (!subcommand(dev, 0x03, 0x30)) {
+        std::printf("input mode 0x30 not acknowledged (%ls)\n", errorText(dev));
+        return;
+    }
+    std::printf("handshake ok, input mode set, player lights %s\n",
+                subcommand(dev, 0x30, 0x01) ? "set" : "not acknowledged");
     std::printf("mapping input, Ctrl+C to quit\n");
     std::fflush(stdout);
 
@@ -516,6 +526,9 @@ void runSession(hid_device* dev, const Config& cfg) {
     bool pressed[kButtonCount]{};
     bool leftKeys[kDirectionCount]{}, rightKeys[kDirectionCount]{};
     auto last = Clock::now();
+    auto lastDebug = last;
+    auto lastRetry = last;
+    bool stalled = false;
     while (g_stop == 0) {
         unsigned char buf[64]{};
         const int n = hid_read_timeout(dev, buf, sizeof buf, kReadTimeoutMs);
@@ -523,9 +536,33 @@ void runSession(hid_device* dev, const Config& cfg) {
             std::printf("device lost (%ls)\n", errorText(dev));
             return;
         }
-        if (n < 12 || buf[0] != 0x30) continue;
-
         const auto now = Clock::now();
+        if (n < 12 || buf[0] != 0x30) {
+            // The controller sometimes does not stream after setup. Release
+            // everything held, ask for input mode 0x30 again once a second, and
+            // tell the user that reconnecting the controller fixes it.
+            if (now - last >= kStallTimeout && now - lastRetry >= kStallTimeout) {
+                if (!stalled) {
+                    stalled = true;
+                    out.releaseAll();
+                    std::fill(std::begin(pressed), std::end(pressed), false);
+                    std::fill(std::begin(leftKeys), std::end(leftKeys), false);
+                    std::fill(std::begin(rightKeys), std::end(rightKeys), false);
+                    std::printf("no input from the controller; retrying. If this persists, "
+                                "unplug and reconnect it.\n");
+                    std::fflush(stdout);
+                }
+                subcommand(dev, 0x03, 0x30);
+                lastRetry = Clock::now();
+            }
+            continue;
+        }
+        if (stalled) {
+            stalled = false;
+            std::printf("input resumed\n");
+            std::fflush(stdout);
+        }
+
         const double dt = std::min(0.05, std::chrono::duration<double>(now - last).count());
         last = now;
 
@@ -536,20 +573,34 @@ void runSession(hid_device* dev, const Config& cfg) {
                 out.press(cfg.buttons[i], down);
             }
         }
-        applyStick(out, cfg.leftStick, decodeStick(buf + 6), cfg, dt, leftKeys);
-        applyStick(out, cfg.rightStick, decodeStick(buf + 9), cfg, dt, rightKeys);
+        const Stick left = decodeStick(buf + 6), right = decodeStick(buf + 9);
+        applyStick(out, cfg.leftStick, left, cfg, dt, leftKeys);
+        applyStick(out, cfg.rightStick, right, cfg, dt, rightKeys);
+        if (debug && now - lastDebug >= std::chrono::milliseconds(250)) {
+            lastDebug = now;
+            std::printf("buttons %02x %02x %02x  left %+.2f %+.2f  right %+.2f %+.2f\n",
+                        buf[3], buf[4], buf[5], left.x, left.y, right.x, right.y);
+            std::fflush(stdout);
+        }
     }
 }
 
 }  // namespace
 
 int main(int argc, char** argv) {
-    if (argc > 2) {
-        std::fprintf(stderr, "usage: %s [config file]\n", argv[0]);
+    bool debug = false;
+    const char* configPath = "procon_mapper.conf";
+    int positional = 0;
+    for (int i = 1; i < argc; ++i) {
+        if (std::string(argv[i]) == "--debug") debug = true;
+        else if (++positional == 1) configPath = argv[i];
+    }
+    if (positional > 1) {
+        std::fprintf(stderr, "usage: %s [--debug] [config file]\n", argv[0]);
         return 2;
     }
     Config cfg;
-    if (!loadConfig(argc == 2 ? argv[1] : "procon_mapper.conf", cfg)) return 1;
+    if (!loadConfig(configPath, cfg)) return 1;
 
     if (!CGPreflightPostEventAccess()) {
         CGRequestPostEventAccess();
@@ -572,7 +623,7 @@ int main(int argc, char** argv) {
     while (g_stop == 0) {
         hid_device* dev = waitForDevice();
         if (dev == nullptr) break;
-        runSession(dev, cfg);
+        runSession(dev, cfg, debug);
         hid_close(dev);
     }
 

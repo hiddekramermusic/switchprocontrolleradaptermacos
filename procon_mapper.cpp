@@ -96,23 +96,31 @@ Stick shapeStick(Stick s, double deadzone) {
 // Actions and config
 
 enum class ActionKind { None, Mouse, Key };
-enum class StickMode { None, Mouse, Scroll };
+enum class StickMode { None, Mouse, Scroll, Keys };
 
 struct Action {
     ActionKind kind = ActionKind::None;
     CGMouseButton mouseButton = kCGMouseButtonLeft;
     std::vector<CGKeyCode> modifiers;
     CGKeyCode key = 0;
-    CGEventFlags flags = 0;
+};
+
+// Direction indices for StickConfig::keys and stick key state.
+enum Direction { kUp, kLeft, kDown, kRight, kDirectionCount };
+
+struct StickConfig {
+    StickMode mode = StickMode::None;
+    CGKeyCode keys[kDirectionCount]{};  // used when mode == Keys
 };
 
 struct Config {
     Action buttons[kButtonCount];
-    StickMode leftStick = StickMode::Mouse;
-    StickMode rightStick = StickMode::Scroll;
-    double mouseSpeed = 1200;  // pixels per second at full deflection
-    double scrollSpeed = 800;  // pixels per second at full deflection
+    StickConfig leftStick{StickMode::Mouse};
+    StickConfig rightStick{StickMode::Scroll};
+    double mouseSpeed = 1200;   // pixels per second at full deflection
+    double scrollSpeed = 800;   // pixels per second at full deflection
     double deadzone = 0.15;
+    double keyThreshold = 0.5;  // deflection at which a stick presses its keys
 };
 
 const std::map<std::string, CGKeyCode>& keyNames() {
@@ -142,21 +150,31 @@ const std::map<std::string, CGKeyCode>& keyNames() {
             {"f1", kVK_F1}, {"f2", kVK_F2}, {"f3", kVK_F3}, {"f4", kVK_F4},
             {"f5", kVK_F5}, {"f6", kVK_F6}, {"f7", kVK_F7}, {"f8", kVK_F8},
             {"f9", kVK_F9}, {"f10", kVK_F10}, {"f11", kVK_F11}, {"f12", kVK_F12},
+            {"shift", kVK_Shift}, {"ctrl", kVK_Control}, {"option", kVK_Option},
+            {"alt", kVK_Option}, {"cmd", kVK_Command},
         };
         return m;
     }();
     return names;
 }
 
-struct Modifier { const char* name; CGKeyCode key; CGEventFlags flag; };
+// Event flag for a modifier key, or 0 for any other key.
+CGEventFlags modifierFlag(CGKeyCode key) {
+    switch (key) {
+        case kVK_Command: return kCGEventFlagMaskCommand;
+        case kVK_Shift:   return kCGEventFlagMaskShift;
+        case kVK_Control: return kCGEventFlagMaskControl;
+        case kVK_Option:  return kCGEventFlagMaskAlternate;
+        default:          return 0;
+    }
+}
 
-constexpr Modifier kModifiers[] = {
-    {"cmd", kVK_Command, kCGEventFlagMaskCommand},
-    {"shift", kVK_Shift, kCGEventFlagMaskShift},
-    {"ctrl", kVK_Control, kCGEventFlagMaskControl},
-    {"option", kVK_Option, kCGEventFlagMaskAlternate},
-    {"alt", kVK_Option, kCGEventFlagMaskAlternate},
-};
+bool parseKey(const std::string& name, CGKeyCode& out, std::string& err) {
+    const auto k = keyNames().find(name);
+    if (k == keyNames().end()) { err = "unknown key '" + name + "'"; return false; }
+    out = k->second;
+    return true;
+}
 
 // Parses "key cmd+shift+tab", "mouse left" or "none".
 bool parseAction(const std::string& text, Action& out, std::string& err) {
@@ -182,27 +200,43 @@ bool parseAction(const std::string& text, Action& out, std::string& err) {
         for (std::string part; std::getline(combo, part, '+');) parts.push_back(part);
         if (parts.empty()) { err = "missing key name"; return false; }
         for (size_t i = 0; i + 1 < parts.size(); ++i) {
-            const auto m = std::find_if(std::begin(kModifiers), std::end(kModifiers),
-                                        [&](const Modifier& mod) { return parts[i] == mod.name; });
-            if (m == std::end(kModifiers)) { err = "unknown modifier '" + parts[i] + "'"; return false; }
-            out.modifiers.push_back(m->key);
-            out.flags |= m->flag;
+            CGKeyCode m = 0;
+            if (!parseKey(parts[i], m, err) || modifierFlag(m) == 0) {
+                err = "unknown modifier '" + parts[i] + "'";
+                return false;
+            }
+            out.modifiers.push_back(m);
         }
-        const auto k = keyNames().find(parts.back());
-        if (k == keyNames().end()) { err = "unknown key '" + parts.back() + "'"; return false; }
-        out.key = k->second;
-        return true;
+        return parseKey(parts.back(), out.key, err);
     }
     err = "unknown action '" + kind + "' (use key, mouse or none)";
     return false;
 }
 
-bool parseStickMode(const std::string& text, StickMode& out) {
-    const std::string t = lower(text);
-    if (t == "mouse") out = StickMode::Mouse;
-    else if (t == "scroll") out = StickMode::Scroll;
-    else if (t == "none") out = StickMode::None;
-    else return false;
+// Parses "mouse", "scroll", "none", "wasd", "arrows" or "keys <up> <left> <down> <right>".
+bool parseStick(const std::string& text, StickConfig& out, std::string& err) {
+    std::istringstream in(lower(text));
+    std::string mode;
+    in >> mode;
+    out = StickConfig{};
+    if (mode == "mouse") out.mode = StickMode::Mouse;
+    else if (mode == "scroll") out.mode = StickMode::Scroll;
+    else if (mode == "none") out.mode = StickMode::None;
+    else if (mode == "wasd") out = {StickMode::Keys, {kVK_ANSI_W, kVK_ANSI_A, kVK_ANSI_S, kVK_ANSI_D}};
+    else if (mode == "arrows") out = {StickMode::Keys, {kVK_UpArrow, kVK_LeftArrow, kVK_DownArrow, kVK_RightArrow}};
+    else if (mode == "keys") {
+        out.mode = StickMode::Keys;
+        for (CGKeyCode& key : out.keys) {
+            std::string name;
+            if (!(in >> name)) { err = "keys needs four keys: up left down right"; return false; }
+            if (!parseKey(name, key, err)) return false;
+        }
+    } else {
+        err = "stick mode must be mouse, scroll, wasd, arrows, keys <up> <left> <down> <right> or none";
+        return false;
+    }
+    std::string extra;
+    if (in >> extra) { err = "unexpected '" + extra + "'"; return false; }
     return true;
 }
 
@@ -232,10 +266,10 @@ bool loadConfig(const char* path, Config& cfg) {
         const std::string value = trim(line.substr(eq + 1));
         std::string err;
         bool ok = true;
-        if (name == "left_stick" || name == "right_stick") {
-            ok = parseStickMode(value, name == "left_stick" ? cfg.leftStick : cfg.rightStick);
-            if (!ok) err = "stick mode must be mouse, scroll or none";
-        }
+        if (name == "left_stick") ok = parseStick(value, cfg.leftStick, err);
+        else if (name == "right_stick") ok = parseStick(value, cfg.rightStick, err);
+        else if (name == "stick_key_threshold")
+            cfg.keyThreshold = std::clamp(std::atof(value.c_str()), 0.1, 0.95);
         else if (name == "mouse_speed") cfg.mouseSpeed = std::atof(value.c_str());
         else if (name == "scroll_speed") cfg.scrollSpeed = std::atof(value.c_str());
         else if (name == "deadzone") cfg.deadzone = std::clamp(std::atof(value.c_str()), 0.0, 0.9);
@@ -270,13 +304,21 @@ public:
             postMouse(mouseButtonEvent(a.mouseButton, down), a.mouseButton, cursor(), 1);
         } else if (a.kind == ActionKind::Key) {
             if (down) {
-                for (CGKeyCode m : a.modifiers) postKey(m, true, 0);
-                postKey(a.key, true, a.flags);
+                for (CGKeyCode m : a.modifiers) key(m, true);
+                key(a.key, true);
             } else {
-                postKey(a.key, false, a.flags);
-                for (auto m = a.modifiers.rbegin(); m != a.modifiers.rend(); ++m) postKey(*m, false, 0);
+                key(a.key, false);
+                for (auto m = a.modifiers.rbegin(); m != a.modifiers.rend(); ++m) key(*m, false);
             }
         }
+    }
+
+    // Presses or releases a key. Keys are counted, so a key held by two
+    // controls is only released when both let go.
+    void key(CGKeyCode k, bool down) {
+        int& count = held_[k];
+        if (down && ++count == 1) postKey(k, true);
+        else if (!down && count > 0 && --count == 0) postKey(k, false);
     }
 
     void moveMouse(double dx, double dy) {
@@ -296,6 +338,7 @@ public:
         else if (mouseDown_[kCGMouseButtonRight]) { type = kCGEventRightMouseDragged; button = kCGMouseButtonRight; }
         else if (mouseDown_[kCGMouseButtonCenter]) { type = kCGEventOtherMouseDragged; button = kCGMouseButtonCenter; }
         CGEventRef e = CGEventCreateMouseEvent(source_, type, p, button);
+        CGEventSetFlags(e, flags_);
         CGEventSetIntegerValueField(e, kCGMouseEventDeltaX, static_cast<int64_t>(stepX));
         CGEventSetIntegerValueField(e, kCGMouseEventDeltaY, static_cast<int64_t>(stepY));
         CGEventPost(kCGHIDEventTap, e);
@@ -322,7 +365,10 @@ public:
             if (down) postMouse(mouseButtonEvent(button, false), button, cursor(), 1);
             down = false;
         }
-        for (CGKeyCode k : std::vector<CGKeyCode>(keysDown_.begin(), keysDown_.end())) postKey(k, false, 0);
+        for (auto& [k, count] : held_) {
+            if (count > 0) postKey(k, false);
+            count = 0;
+        }
     }
 
 private:
@@ -354,24 +400,27 @@ private:
 
     void postMouse(CGEventType type, CGMouseButton button, CGPoint p, int64_t clickState) {
         CGEventRef e = CGEventCreateMouseEvent(source_, type, p, button);
+        CGEventSetFlags(e, flags_);
         CGEventSetIntegerValueField(e, kCGMouseEventClickState, clickState);
         CGEventPost(kCGHIDEventTap, e);
         CFRelease(e);
     }
 
-    void postKey(CGKeyCode key, bool down, CGEventFlags flags) {
+    // Posts a key event carrying the modifiers currently held by this output.
+    void postKey(CGKeyCode key, bool down) {
+        if (down) flags_ |= modifierFlag(key);
+        else flags_ &= ~modifierFlag(key);
         CGEventRef e = CGEventCreateKeyboardEvent(source_, key, down);
-        if (flags != 0) CGEventSetFlags(e, flags);
+        CGEventSetFlags(e, flags_);
         CGEventPost(kCGHIDEventTap, e);
         CFRelease(e);
-        if (down) keysDown_.push_back(key);
-        else keysDown_.erase(std::remove(keysDown_.begin(), keysDown_.end(), key), keysDown_.end());
     }
 
     CGEventSourceRef source_;
     std::map<CGMouseButton, bool> mouseDown_{
         {kCGMouseButtonLeft, false}, {kCGMouseButtonRight, false}, {kCGMouseButtonCenter, false}};
-    std::vector<CGKeyCode> keysDown_;
+    std::map<CGKeyCode, int> held_;
+    CGEventFlags flags_ = 0;
     double accX_ = 0, accY_ = 0, scrollX_ = 0, scrollY_ = 0;
 };
 
@@ -417,9 +466,40 @@ bool setPlayerLights(hid_device* dev, unsigned char mask) {
                    [](const unsigned char* b, int n) { return n >= 15 && b[0] == 0x21 && b[14] == 0x30; });
 }
 
-void applyStick(Output& out, StickMode mode, Stick s, const Config& cfg, double dt) {
-    if (mode == StickMode::Mouse) out.moveMouse(s.x * cfg.mouseSpeed * dt, -s.y * cfg.mouseSpeed * dt);
-    else if (mode == StickMode::Scroll) out.scroll(-s.x * cfg.scrollSpeed * dt, s.y * cfg.scrollSpeed * dt);
+// Directions pressed for each of the 8 sectors, counter-clockwise from right.
+constexpr Direction kSectorDirections[8][2] = {
+    {kRight, kRight}, {kUp, kRight}, {kUp, kUp},     {kUp, kLeft},
+    {kLeft, kLeft},   {kDown, kLeft}, {kDown, kDown}, {kDown, kRight},
+};
+
+// Presses one key for straight directions and two for diagonals. Once a key
+// is down the stick has to drop 0.1 below the threshold to release it.
+void applyStickKeys(Output& out, const StickConfig& sc, Stick raw, double threshold,
+                    bool (&down)[kDirectionCount]) {
+    bool want[kDirectionCount]{};
+    const bool anyDown = std::find(std::begin(down), std::end(down), true) != std::end(down);
+    if (std::hypot(raw.x, raw.y) > (anyDown ? threshold - 0.1 : threshold)) {
+        const int sector = static_cast<int>(std::lround(std::atan2(raw.y, raw.x) / (M_PI / 4))) & 7;
+        want[kSectorDirections[sector][0]] = true;
+        want[kSectorDirections[sector][1]] = true;
+    }
+    for (int d = 0; d < kDirectionCount; ++d) {
+        if (want[d] != down[d]) {
+            down[d] = want[d];
+            out.key(sc.keys[d], want[d]);
+        }
+    }
+}
+
+void applyStick(Output& out, const StickConfig& sc, Stick raw, const Config& cfg, double dt,
+                bool (&keysDown)[kDirectionCount]) {
+    const Stick s = shapeStick(raw, cfg.deadzone);
+    switch (sc.mode) {
+        case StickMode::Mouse:  out.moveMouse(s.x * cfg.mouseSpeed * dt, -s.y * cfg.mouseSpeed * dt); break;
+        case StickMode::Scroll: out.scroll(-s.x * cfg.scrollSpeed * dt, s.y * cfg.scrollSpeed * dt); break;
+        case StickMode::Keys:   applyStickKeys(out, sc, raw, cfg.keyThreshold, keysDown); break;
+        case StickMode::None:   break;
+    }
 }
 
 void runSession(hid_device* dev, const Config& cfg) {
@@ -434,6 +514,7 @@ void runSession(hid_device* dev, const Config& cfg) {
 
     Output out;
     bool pressed[kButtonCount]{};
+    bool leftKeys[kDirectionCount]{}, rightKeys[kDirectionCount]{};
     auto last = Clock::now();
     while (g_stop == 0) {
         unsigned char buf[64]{};
@@ -455,8 +536,8 @@ void runSession(hid_device* dev, const Config& cfg) {
                 out.press(cfg.buttons[i], down);
             }
         }
-        applyStick(out, cfg.leftStick, shapeStick(decodeStick(buf + 6), cfg.deadzone), cfg, dt);
-        applyStick(out, cfg.rightStick, shapeStick(decodeStick(buf + 9), cfg.deadzone), cfg, dt);
+        applyStick(out, cfg.leftStick, decodeStick(buf + 6), cfg, dt, leftKeys);
+        applyStick(out, cfg.rightStick, decodeStick(buf + 9), cfg, dt, rightKeys);
     }
 }
 

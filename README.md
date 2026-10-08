@@ -16,8 +16,9 @@ Games receive keyboard and mouse input instead.
 
 ## Requirements
 
-- Apple Silicon Mac (the binaries in `dist/arm64` are arm64)
-- hidapi from Homebrew: `brew install hidapi`
+- macOS 11 or later on Apple Silicon, macOS 10.15 or later on Intel (the
+  binaries in `dist/universal` contain both architectures and need no other
+  libraries). Tested on macOS 15.7.3, Apple Silicon.
 - Accessibility permission for the app that runs `procon_mapper` (e.g.
   Terminal): System Settings > Privacy & Security > Accessibility. Without it
   the program asks for the permission and exits.
@@ -27,7 +28,7 @@ Games receive keyboard and mouse input instead.
 1. Unplug the controller's USB cable.
 2. Start the mapper:
    ```
-   ./dist/arm64/procon_mapper procon_mapper_gaming.conf
+   ./dist/universal/procon_mapper procon_mapper_gaming.conf
    ```
 3. Plug the cable back in. The mapper prints `mapping input, Ctrl+C to quit`.
 
@@ -39,7 +40,7 @@ unplug. Ctrl+C quits.
 `--debug` prints the button bytes and stick positions four times a second:
 
 ```
-./dist/arm64/procon_mapper --debug procon_mapper_gaming.conf
+./dist/universal/procon_mapper --debug procon_mapper_gaming.conf
 ```
 
 ## Configurations
@@ -91,11 +92,15 @@ The full list of key names is in `procon_mapper.conf`.
 
 ## Building
 
+Requires CMake 3.24+ and Xcode or the Command Line Tools. The configure step
+downloads hidapi 0.15.0.
+
 ```
-clang++ -std=c++20 -O2 procon_mapper.cpp $(pkg-config --cflags --libs hidapi) \
-    -framework ApplicationServices -framework CoreFoundation -o procon_mapper
-clang++ -std=c++20 -O2 procon_init.cpp $(pkg-config --cflags --libs hidapi) -o procon_init
+cmake -B build
+cmake --build build
 ```
+
+The binaries are written to `build/`.
 
 ## procon_init (diagnostics)
 

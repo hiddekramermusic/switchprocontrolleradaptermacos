@@ -119,6 +119,7 @@ struct Config {
     StickConfig leftStick{StickMode::Mouse};
     StickConfig rightStick{StickMode::Scroll};
     double mouseSpeed = 1200;   // pixels per second at full deflection
+    bool relativeMouse = false; // only send movement deltas, leave the cursor where it is
     double scrollSpeed = 800;   // pixels per second at full deflection
     double deadzone = 0.15;
     double keyThreshold = 0.5;  // deflection at which a stick presses its keys
@@ -272,6 +273,12 @@ bool loadConfig(const char* path, Config& cfg) {
         else if (name == "stick_key_threshold")
             cfg.keyThreshold = std::clamp(std::atof(value.c_str()), 0.1, 0.95);
         else if (name == "mouse_speed") cfg.mouseSpeed = std::atof(value.c_str());
+        else if (name == "mouse_mode") {
+            const std::string mode = lower(value);
+            if (mode == "absolute") cfg.relativeMouse = false;
+            else if (mode == "relative") cfg.relativeMouse = true;
+            else err = "mouse_mode must be absolute or relative";
+        }
         else if (name == "scroll_speed") cfg.scrollSpeed = std::atof(value.c_str());
         else if (name == "deadzone") cfg.deadzone = std::clamp(std::atof(value.c_str()), 0.0, 0.9);
         else {
@@ -322,7 +329,10 @@ public:
         else if (!down && count > 0 && --count == 0) postKey(k, false);
     }
 
-    void moveMouse(double dx, double dy) {
+    // Absolute: moves the cursor by the step. Relative: posts the event at the
+    // current cursor position and carries the step only in the delta fields,
+    // so a game that locks or recenters the cursor keeps control of it.
+    void moveMouse(double dx, double dy, bool relative) {
         accX_ += dx;
         accY_ += dy;
         const double stepX = std::trunc(accX_), stepY = std::trunc(accY_);
@@ -330,9 +340,11 @@ public:
         accX_ -= stepX;
         accY_ -= stepY;
         CGPoint p = cursor();
-        p.x += stepX;
-        p.y += stepY;
-        p = clampToDisplays(p);
+        if (!relative) {
+            p.x += stepX;
+            p.y += stepY;
+            p = clampToDisplays(p);
+        }
         CGEventType type = kCGEventMouseMoved;
         CGMouseButton button = kCGMouseButtonLeft;
         if (mouseDown_[kCGMouseButtonLeft]) type = kCGEventLeftMouseDragged;
@@ -498,7 +510,7 @@ void applyStick(Output& out, const StickConfig& sc, Stick raw, const Config& cfg
                 bool (&keysDown)[kDirectionCount]) {
     const Stick s = shapeStick(raw, cfg.deadzone);
     switch (sc.mode) {
-        case StickMode::Mouse:  out.moveMouse(s.x * cfg.mouseSpeed * dt, -s.y * cfg.mouseSpeed * dt); break;
+        case StickMode::Mouse:  out.moveMouse(s.x * cfg.mouseSpeed * dt, -s.y * cfg.mouseSpeed * dt, cfg.relativeMouse); break;
         case StickMode::Scroll: out.scroll(-s.x * cfg.scrollSpeed * dt, s.y * cfg.scrollSpeed * dt); break;
         case StickMode::Keys:   applyStickKeys(out, sc, raw, cfg.keyThreshold, keysDown); break;
         case StickMode::None:   break;

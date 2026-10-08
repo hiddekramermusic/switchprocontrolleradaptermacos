@@ -80,6 +80,10 @@ One `name = value` per line; `#` starts a comment.
 - Settings:
   - `mouse_speed`, `scroll_speed`: pixels per second at full deflection;
     a negative `scroll_speed` inverts scrolling
+  - `mouse_mode`: `absolute` (default) moves the cursor on screen. `relative`
+    leaves the cursor where it is and sends the stick movement only as mouse
+    deltas, for games that lock or recenter the cursor. In `relative` mode the
+    cursor does not move in menus that use a free cursor.
   - `deadzone`: fraction of full deflection ignored around the center
   - `stick_key_threshold`: deflection at which a stick presses its keys
 

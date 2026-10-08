@@ -11,23 +11,31 @@ macOS. See README.md for user-facing usage and the config format.
 - `procon_init.cpp`: diagnostic tool. Sends configurable `80 xx` commands and
   logs every input report (`--exclusive`, `--no-init`, `--seq`, `--player`).
 - `procon_mapper.conf` (desktop, default), `procon_mapper_gaming.conf` (games).
-- `dist/arm64/`: committed arm64 binaries. They link Homebrew's
-  `/opt/homebrew/opt/hidapi/lib/libhidapi.0.dylib`.
+- `CMakeLists.txt`: builds both programs as universal binaries (arm64 +
+  x86_64) with hidapi 0.15.0 linked statically.
+- `dist/universal/`: committed universal binaries. Minimum macOS 10.15
+  (x86_64) / 11.0 (arm64). They link only system frameworks.
 
 ## Build
 
 ```
-clang++ -std=c++20 -O2 -Wall -Wextra procon_mapper.cpp $(pkg-config --cflags --libs hidapi) \
-    -framework ApplicationServices -framework CoreFoundation -o procon_mapper
-clang++ -std=c++20 -O2 -Wall -Wextra procon_init.cpp $(pkg-config --cflags --libs hidapi) -o procon_init
+cmake -B build
+cmake --build build
 ```
 
-- Include hidapi as `<hidapi.h>` / `<hidapi_darwin.h>`: Homebrew's pkg-config
-  adds `include/hidapi` to the include path, so `<hidapi/hidapi.h>` fails.
+- The configure step downloads hidapi 0.15.0 from GitHub (pinned by SHA256)
+  and builds it as a static library.
+- `CMAKE_OSX_DEPLOYMENT_TARGET` is 10.15, the lowest target that has
+  `CGPreflightPostEventAccess` / `CGRequestPostEventAccess`. arm64 slices get
+  11.0. `-Werror=unguarded-availability` fails the build if code uses an API
+  newer than the target.
+- Include hidapi as `<hidapi.h>` / `<hidapi_darwin.h>`.
 - Builds must stay warning-free with `-Wall -Wextra`.
-- After changing a program, copy the new build into `dist/arm64/`.
-- Binaries in the repo root and `compile_flags.txt` (machine-specific editor
-  include path) are git-ignored.
+- After changing a program, copy the new builds from `build/` into
+  `dist/universal/`. Check with `lipo -info`, `otool -L` (system libraries
+  only) and `otool -l | grep minos`.
+- `build/`, binaries in the repo root and `compile_flags.txt` (machine-specific
+  editor include path) are git-ignored.
 
 ## Controller behavior established by testing
 
